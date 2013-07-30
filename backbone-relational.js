@@ -34,6 +34,7 @@
 	 * Semaphore mixin; can be used as both binary and counting.
 	 **/
 	Backbone.Semaphore = {
+		_class: 'Backbone.Semaphore',
 		_permitsAvailable: null,
 		_permitsUsed: 0,
 
@@ -76,6 +77,7 @@
 		this._queue = [];
 	};
 	_.extend( Backbone.BlockingQueue.prototype, Backbone.Semaphore, {
+		_class: 'Backbone.BlockingQueue',
 		_queue: null,
 
 		add: function( func ) {
@@ -138,6 +140,7 @@
 		this._modelScopes = [ exports ];
 	};
 	_.extend( Backbone.Store.prototype, Backbone.Events, {
+		_class: 'Backbone.Store',
 		/**
 		 * Create a new `Relation`.
 		 * @param {Backbone.RelationalModel} [model]
@@ -377,7 +380,7 @@
 					id = item.id;
 				}
 				else if ( _.isObject( item ) ) {
-					id = item[ type.prototype.idAttribute ];
+					id = type.prototype._getNewId(item);
 				}
 			}
 
@@ -567,6 +570,7 @@
 	Backbone.Relation.extend = Backbone.Model.extend;
 	// Set up all inheritable **Backbone.Relation** properties and methods.
 	_.extend( Backbone.Relation.prototype, Backbone.Events, Backbone.Semaphore, {
+		_class: 'Backbone.Relation',
 		options: {
 			createModels: true,
 			includeInJSON: true,
@@ -694,6 +698,7 @@
 	});
 
 	Backbone.HasOne = Backbone.Relation.extend({
+		_class: 'Backbone.HasOne',
 		options: {
 			reverseRelation: { type: 'HasMany' }
 		},
@@ -832,6 +837,7 @@
 	});
 
 	Backbone.HasMany = Backbone.Relation.extend({
+		_class: 'Backbone.HasMany',
 		collectionType: null,
 
 		options: {
@@ -1076,6 +1082,7 @@
 	 *  - 'change:<key>' (model, related model or collection, options)
 	 */
 	Backbone.RelationalModel = Backbone.Model.extend({
+		_class: 'Backbone.RelationalModel',
 		relations: null, // Relation descriptions on the prototype
 		_relations: null, // Relation instances
 		_isInitialized: false,
@@ -1085,6 +1092,8 @@
 
 		subModelTypeAttribute: 'type',
 		subModelTypes: null,
+		keydefs: {},
+		compoundKeyDelim: '-',
 
 		constructor: function( attributes, options ) {
 			// Nasty hack, for cases like 'model.get( <HasMany key> ).add( item )'.
@@ -1369,7 +1378,33 @@
 
 			return originalResult || result;
 		},
-
+		
+		_getNewId: function( attributes ) {
+			var me = this,
+				newId = null,
+				composite = '',
+				missing = false,
+				val,
+				primaryKey = me.keydefs.PRIMARY;
+			
+			if (primaryKey) {
+				primaryKey.forEach(function(id, index) {
+					val = attributes[id] || (me.attributes && me.attributes[id]);
+					if (val || val === 0) {
+						composite += ( composite ? me.compoundKeyDelim : "" ) + (attributes[id] || (me.attributes && me.attributes[id]));
+					} else {
+						missing = true;
+					}
+				});
+				if (!missing)
+					newId = composite;
+			}
+			if (!newId) {
+				newId = attributes && me.idAttribute in attributes && attributes[ me.idAttribute ];
+			}
+			return newId;
+		},
+		
 		set: function( key, value, options ) {
 			Backbone.Relational.eventQueue.block();
 
@@ -1386,12 +1421,15 @@
 
 			try {
 				var id = this.id,
-					newId = attributes && this.idAttribute in attributes && attributes[ this.idAttribute ];
+					newId = this._getNewId( attributes );
 
 				// Check if we're not setting a duplicate id before actually calling `set`.
 				Backbone.Relational.store.checkId( this, newId );
 
 				var result = Backbone.Model.prototype.set.apply( this, arguments );
+				if ( newId ) {
+					this.id = newId;
+				}
 
 				// Ideal place to set up relations, if this is the first time we're here for this model
 				if ( !this._isInitialized && !this.isLocked() ) {
@@ -1706,6 +1744,7 @@
 	});
 	_.extend( Backbone.RelationalModel.prototype, Backbone.Semaphore );
 
+	Backbone.Collection.prototype._class = "Backbone.Collection";
 	/**
 	 * Override Backbone.Collection._prepareModel, so objects will be built using the correct type
 	 * if the collection.model has subModels.
@@ -1797,6 +1836,20 @@
 		}, this );
 		
 		return this;
+	};
+	
+	/**
+	 * Override 'Backbone.Collection.get' to use a compound key object
+	 */
+	var get = Backbone.Collection.prototype.__get = Backbone.Collection.prototype.get;
+	Backbone.Collection.prototype.get = function(obj) {
+		// Short-circuit if this Collection doesn't hold RelationalModels
+		if ( !( this.model.prototype instanceof Backbone.RelationalModel ) ) {
+			return get.apply( this, arguments );
+		}
+		if (obj == null) return void 0;
+		var id = Backbone.Relational.store.resolveIdForItem( this.model, obj );
+		return this._byId[id != null ? id : obj.cid || obj];
 	};
 
 	/**
