@@ -466,8 +466,7 @@
 		 * @param {Backbone.RelationalModel} model
 		 */
 		unregister: function( model, collection, options ) {
-			this.stopListening( model, 'destroy', this.unregister );
-			this.stopListening( model, 'relational:unregister', this.unregister );
+			this.stopListening( model );
 			var coll = this.getCollection( model );
 			coll && coll.remove( model, options );
 		},
@@ -548,7 +547,7 @@
 
 			// Explicitly clear 'keySource', to prevent a leaky abstraction if 'keySource' differs from 'key'.
 			if ( this.keySource !== this.key ) {
-				this.instance.unset( this.keySource, { silent: true } );
+				delete this.instance.attributes[ this.keySource ];
 			}
 
 			// Add this Relation to instance._relations
@@ -1220,10 +1219,15 @@
 		updateRelations: function( options ) {
 			if ( this._isInitialized && !this.isLocked() ) {
 				_.each( this._relations, function( rel ) {
-					// Update from data in `rel.keySource` if set, or `rel.key` otherwise
+					// Update from data in `rel.keySource` if data got set in there, or `rel.key` otherwise
 					var val = this.attributes[ rel.keySource ] || this.attributes[ rel.key ];
 					if ( rel.related !== val ) {
 						this.trigger( 'relational:change:' + rel.key, this, val, options || {} );
+					}
+
+					// Explicitly clear 'keySource', to prevent a leaky abstraction if 'keySource' differs from 'key'.
+					if ( rel.keySource !== rel.key ) {
+						delete rel.instance.attributes[ rel.keySource ];
 					}
 				}, this );
 			}
@@ -1361,7 +1365,7 @@
 			// Go through all splits and return the final result
 			var splits = attr.split( '.' );
 			var result = _.reduce(splits, function( model, split ) {
-				if (_.isNull(model) || _.isUndefined(model)) {
+				if ( _.isNull(model) || _.isUndefined( model ) ) {
 					// Return undefined if the path cannot be expanded
 					return undefined;
 				}
@@ -1451,30 +1455,6 @@
 				Backbone.Relational.eventQueue.unblock();
 			}
 			
-			return result;
-		},
-
-		unset: function( attribute, options ) {
-			Backbone.Relational.eventQueue.block();
-
-			var result = Backbone.Model.prototype.unset.apply( this, arguments );
-			this.updateRelations( options );
-
-			// Try to run the global queue holding external events
-			Backbone.Relational.eventQueue.unblock();
-
-			return result;
-		},
-
-		clear: function( options ) {
-			Backbone.Relational.eventQueue.block();
-			
-			var result = Backbone.Model.prototype.clear.apply( this, arguments );
-			this.updateRelations( options );
-
-			// Try to run the global queue holding external events
-			Backbone.Relational.eventQueue.unblock();
-
 			return result;
 		},
 
@@ -1634,57 +1614,92 @@
 		 * @return {Backbone.Model}
 		 */
 		build: function( attributes, options ) {
-			var model = this;
-
 			// 'build' is a possible entrypoint; it's possible no model hierarchy has been determined yet.
 			this.initializeModelHierarchy();
 
 			// Determine what type of (sub)model should be built if applicable.
-			// Lookup the proper subModelType in 'this._subModels'.
-			if ( this._subModels && this.prototype.subModelTypeAttribute in attributes ) {
-				var subModelTypeAttribute = attributes[ this.prototype.subModelTypeAttribute ];
-				var subModelType = this._subModels[ subModelTypeAttribute ];
-				if ( subModelType ) {
-					model = subModelType;
-				}
-			}
+			var model = this._findSubModelType(this, attributes) || this;
 			
 			return new model( attributes, options );
+		},
+
+		/**
+		 * Determines what type of (sub)model should be built if applicable.
+		 * Looks up the proper subModelType in 'this._subModels', recursing into
+		 * types until a match is found.  Returns the applicable 'Backbone.Model'
+		 * or null if no match is found.
+		 * @param {Backbone.Model} type
+		 * @param {Object} attributes
+		 * @return {Backbone.Model}
+		 */
+		_findSubModelType: function (type, attributes) {
+			if ( type._subModels && type.prototype.subModelTypeAttribute in attributes ) {
+				var subModelTypeAttribute = attributes[type.prototype.subModelTypeAttribute];
+				var subModelType = type._subModels[subModelTypeAttribute];
+				if ( subModelType ) {
+					return subModelType;
+				} else {
+					// Recurse into subModelTypes to find a match
+					for ( subModelTypeAttribute in type._subModels ) {
+						subModelType = this._findSubModelType(type._subModels[subModelTypeAttribute], attributes);
+						if ( subModelType ) {
+							return subModelType;
+						}
+					}
+				}
+			}
+			return null;
 		},
 
 		/**
 		 *
 		 */
 		initializeModelHierarchy: function() {
-			// If we're here for the first time, try to determine if this modelType has a 'superModel'.
-			if ( _.isUndefined( this._superModel ) || _.isNull( this._superModel ) ) {
-				Backbone.Relational.store.setupSuperModel( this );
-
-				// If a superModel has been found, copy relations from the _superModel if they haven't been
-				// inherited automatically (due to a redefinition of 'relations').
-				// Otherwise, make sure we don't get here again for this type by making '_superModel' false so we fail
-				// the isUndefined/isNull check next time.
-				if ( this._superModel && this._superModel.prototype.relations ) {
-					// Find relations that exist on the `_superModel`, but not yet on this model.
+			// Inherit any relations that have been defined in the parent model.
+			this.inheritRelations();
+	
+			// If we came here through 'build' for a model that has 'subModelTypes' then try to initialize the ones that
+			// haven't been resolved yet.
+			if ( this.prototype.subModelTypes ) {
+				var resolvedSubModels = _.keys(this._subModels);
+				var unresolvedSubModels = _.omit(this.prototype.subModelTypes, resolvedSubModels);
+				_.each( unresolvedSubModels, function( subModelTypeName ) {
+					var subModelType = Backbone.Relational.store.getObjectByName( subModelTypeName );
+					subModelType && subModelType.initializeModelHierarchy();
+				});
+			}
+		},
+		
+		inheritRelations: function() {
+			// Bail out if we've been here before.
+			if (!_.isUndefined( this._superModel ) && !_.isNull( this._superModel )) { 
+				return; 
+			}
+			// Try to initialize the _superModel.
+			Backbone.Relational.store.setupSuperModel( this );
+	
+			// If a superModel has been found, copy relations from the _superModel if they haven't been inherited automatically 
+			// (due to a redefinition of 'relations').
+			if ( this._superModel ) {
+				// The _superModel needs a chance to initialize its own inherited relations before we attempt to inherit relations 
+				// from the _superModel. You don't want to call 'initializeModelHierarchy' because that could cause sub-models of
+				// this class to inherit their relations before this class has had chance to inherit it's relations.
+				this._superModel.inheritRelations();
+				if ( this._superModel.prototype.relations ) {
+					// Find relations that exist on the '_superModel', but not yet on this model.
 					var inheritedRelations = _.select( this._superModel.prototype.relations || [], function( superRel ) {
 						return !_.any( this.prototype.relations || [], function( rel ) {
 							return superRel.relatedModel === rel.relatedModel && superRel.key === rel.key;
 						}, this );
 					}, this );
-
+	
 					this.prototype.relations = inheritedRelations.concat( this.prototype.relations );
 				}
-				else {
-					this._superModel = false;
-				}
 			}
-
-			// If we came here through 'build' for a model that has 'subModelTypes', and not all of them have been resolved yet, try to resolve each.
-			if ( this.prototype.subModelTypes && _.keys( this.prototype.subModelTypes ).length !== _.keys( this._subModels ).length ) {
-				_.each( this.prototype.subModelTypes || [], function( subModelTypeName ) {
-					var subModelType = Backbone.Relational.store.getObjectByName( subModelTypeName );
-					subModelType && subModelType.initializeModelHierarchy();
-				});
+			// Otherwise, make sure we don't get here again for this type by making '_superModel' false so we fail the 
+			// isUndefined/isNull check next time.
+			else {
+				this._superModel = false;
 			}
 		},
 
@@ -1862,14 +1877,14 @@
 			return remove.apply( this, arguments );
 		}
 
-		models = _.isArray( models ) ? models.slice() : [ models ];
+		models = _.isArray( models ) ? models.slice( 0 ) : [ models ];
 		options || ( options = {} );
 
 		var toRemove = [];
 
 		//console.debug('calling remove on coll=%o; models=%o, options=%o', this, models, options );
 		_.each( models, function( model ) {
-			model = this.get( model ) || this.get( model.cid );
+			model = this.get( model ) || ( model && this.get( model.cid ) );
 			model && toRemove.push( model );
 		}, this );
 
