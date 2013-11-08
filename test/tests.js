@@ -1354,7 +1354,7 @@ $(document).ready(function() {
 			var Animal2 = Animal.extend({
 				initialize: function(options) {
 					this.on( 'all', function( name, event ) {
-						console.log( 'Animal2: %o', arguments );
+						//console.log( 'Animal2: %o', arguments );
 						if ( name.indexOf( 'change' ) === 0 ) {
 							modelChangeEvents++;
 						}
@@ -1367,7 +1367,7 @@ $(document).ready(function() {
 
 				initialize: function(options) {
 					this.on( 'all', function( name, event ) {
-						console.log( 'AnimalCollection2: %o', arguments );
+						//console.log( 'AnimalCollection2: %o', arguments );
 						if ( name.indexOf('change') === 0 ) {
 							collectionChangeEvents++;
 						}
@@ -1877,6 +1877,10 @@ $(document).ready(function() {
 		});
 
 		test("'dotNotation' is true", function(){
+			var Role = Backbone.RelationalModel.extend({});
+			var Roles = Backbone.Collection.extend({
+				model: Role
+			});
 			var NewUser = Backbone.RelationalModel.extend({});
 			var NewPerson = Backbone.RelationalModel.extend({
 				dotNotation: true,
@@ -1884,13 +1888,23 @@ $(document).ready(function() {
 					type: Backbone.HasOne,
 					key: 'user',
 					relatedModel: NewUser
+				},
+				{
+					type: Backbone.HasMany,
+					key: 'roles',
+					relatedModel: Role,
+					collectionType: Roles
 				}]
 			});
 			
 			var person = new NewPerson({
 				"normal": true,
 				"user.over": 2,
-				user: {name: "John", "over" : 1}
+				user: {name: "John", "over" : 1},
+				roles: [
+					{name: 'publisher'},
+					{name: 'moderator'}
+				]
 			});
 			
 			ok( person.get( 'normal' ) === true, "getting normal attributes works as usual" );
@@ -1900,6 +1914,10 @@ $(document).ready(function() {
 			raises( function() {
 				person.get( 'user.over' );
 			}, "getting ambiguous nested attributes raises an exception");
+			ok( person.get('roles.0') instanceof Role, "get by index works for nested collections");
+			ok( person.get('roles.0.name') === "publisher", "attributes of models of nested collections can be get via dot notation: nested.0.attribute");
+			ok( person.get('roles.100') === undefined, "undefined when index is out of bounds");
+			ok( person.get('roles.100.name') === undefined, "attributes of out-of-bounds models of nested collections are undefined");
 		});
 
 		test( "Relations load from both `keySource` and `key`", function() {
@@ -2693,6 +2711,47 @@ $(document).ready(function() {
 			var b2 = new B({ a: a2 });
 			ok( b2.get( 'a' ) instanceof A );
 			ok( b2.get( 'a' ).id == 'a2' );
+		});
+
+		test( "Can retrieve relations if it's a property or a method", function () {
+			window.Zoo.prototype._relations = window.Zoo.prototype.relations;
+			window.Zoo.prototype.relations = function () {
+				return [
+					{
+						type: Backbone.HasMany,
+						key: 'animals',
+						relatedModel: function() {
+							return Animal; // or `require` it from somewhere
+						},
+						includeInJSON: [ 'id', 'species' ],
+						collectionType: function() {
+							return AnimalCollection; // or `require` it from somewhere
+						},
+						collectionOptions: function( instance ) { return { 'url': 'zoo/' + instance.cid + '/animal/' } },
+						reverseRelation: {
+							key: 'livesIn',
+							includeInJSON: [ 'id', 'name' ]
+						}
+					}
+				];
+			};
+
+			var animalData = [
+				{ id: 1, species: 'Lion' },
+				{ id: 2 ,species: 'Zebra' }
+			];
+
+			var zoo = new Zoo( { animals: animalData } ),
+				animals = zoo.get( 'animals' );
+
+			ok( animals instanceof AnimalCollection );
+			equal( animals.length, 2, "Two animals in 'zoo'" );
+			ok( animals.at( 0 ) instanceof Animal );
+
+			zoo.destroy();
+
+			window.Zoo.prototype.relations = window.Zoo.prototype._relations;
+			delete window.Zoo.prototype._relations;
 		});
 
 
@@ -3980,7 +4039,6 @@ $(document).ready(function() {
 			var a = animals.pop(),
 				b = animals.pop();
 
-			console.log( a, a.get( 'name' ), b );
 			ok( a && a.get( 'name' ) === 'a' );
 			ok( typeof b === 'undefined' );
 		});
@@ -4283,11 +4341,11 @@ $(document).ready(function() {
 
 			person
 				.on('change:livesIn', function() {
-					console.log( arguments );
+					//console.log( arguments );
 					house.set({livesIn: house});
 				})
 				.on( 'change', function () {
-					console.log( arguments );
+					//console.log( arguments );
 					changeEventsTriggered++;
 				});
 

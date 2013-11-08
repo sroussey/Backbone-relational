@@ -1,6 +1,6 @@
 /* vim: set tabstop=4 softtabstop=4 shiftwidth=4 noexpandtab: */
 /**
- * Backbone-relational.js 0.8.5
+ * Backbone-relational.js 0.8.6
  * (c) 2011-2013 Paul Uithol and contributors (https://github.com/PaulUithol/Backbone-relational/graphs/contributors)
  * 
  * Backbone-relational may be freely distributed under the MIT license; see the accompanying LICENSE.txt.
@@ -515,7 +515,12 @@
 		this.keyDestination = this.options.keyDestination || this.keySource || this.key;
 
 		this.model = this.options.model || this.instance.constructor;
+
 		this.relatedModel = this.options.relatedModel;
+
+		if ( _.isFunction( this.relatedModel ) && !( this.relatedModel.prototype instanceof Backbone.RelationalModel ) ) {
+			this.relatedModel = _.result( this, 'relatedModel' );
+		}
 		if ( _.isString( this.relatedModel ) ) {
 			this.relatedModel = Backbone.Relational.store.getObjectByName( this.relatedModel );
 		}
@@ -851,6 +856,9 @@
 			
 			// Handle a custom 'collectionType'
 			this.collectionType = this.options.collectionType;
+			if ( _.isFunction( this.collectionType ) && this.collectionType !== Backbone.Collection && !( this.collectionType.prototype instanceof Backbone.Collection ) ) {
+				this.collectionType = _.result( this, 'collectionType' );
+			}
 			if ( _.isString( this.collectionType ) ) {
 				this.collectionType = Backbone.Relational.store.getObjectByName( this.collectionType );
 			}
@@ -1203,7 +1211,7 @@
 			this.acquire(); // Setting up relations often also involve calls to 'set', and we only want to enter this function once
 			this._relations = {};
 
-			_.each( this.relations || [], function( rel ) {
+			_.each( _.result( this, 'relations' ) || [], function( rel ) {
 				Backbone.Relational.store.initializeRelation( this, rel, options );
 			}, this );
 
@@ -1369,11 +1377,15 @@
 					// Return undefined if the path cannot be expanded
 					return undefined;
 				}
-				if ( !( model instanceof Backbone.Model ) ) {
-					throw new Error( 'Attribute must be an instanceof Backbone.Model. Is: ' + model + ', currentSplit: ' + split );
+				else if ( model instanceof Backbone.Model ) {
+					return Backbone.Model.prototype.get.call( model, split );
 				}
-
-				return Backbone.Model.prototype.get.call( model, split );
+				else if ( model instanceof Backbone.Collection ) {
+					return Backbone.Collection.prototype.at.call( model, split )
+				}
+				else {
+					throw new Error( 'Attribute must be an instanceof Backbone.Model or Backbone.Collection. Is: ' + model + ', currentSplit: ' + split );
+				}
 			}, this );
 
 			if ( originalResult !== undefined && result !== undefined ) {
