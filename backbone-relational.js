@@ -570,7 +570,7 @@
 				.listenTo( this.relatedCollection, 'relational:remove', this.removeRelated )
 		}
 	};
-	// Fix inheritance :\
+	// Fix inheritance :\ 
 	Backbone.Relation.extend = Backbone.Model.extend;
 	// Set up all inheritable **Backbone.Relation** properties and methods.
 	_.extend( Backbone.Relation.prototype, Backbone.Events, Backbone.Semaphore, {
@@ -1144,6 +1144,60 @@
 				// Try to run the global queue holding external events
 				Backbone.Relational.eventQueue.unblock();
 			}
+			this.createSavepoint();
+			this.on('sync', this.createSavepoint, this);
+		},
+
+		// Save a snapshot in JSON format
+		createSavepoint: function() {
+			this.savepoint = JSON.parse(JSON.stringify(this));
+			return this;
+		},
+		 
+		// Rollback to a savepoint
+		rollback: function(options) {
+			options = options || {};
+			this.set(this.savepoint);
+			this.changed = []; // TODO: controversial
+			if (!options.silent) this.trigger('rollback', this, options);
+		},
+		
+		commit: function( options ) {
+			options = options || {};
+			var me = this,
+				isNew = me.isNew(),
+				relationsToFix = [],
+				promises = [];
+
+			if (isNew || me.hasChangedDeepSinceSavepoint()) {
+				if (!isNew) {
+					me.relations.each(function(relation) {
+						if (relation.includeInJSON) {
+							relationsToFix.push(relation);
+							relation.includeInJSON = false;
+
+							if (!relation.isAutoRelation) {
+								var subCollection = me.get(relation.key);
+								promises.push(subCollection.commit(options));
+							}
+						}
+					});
+				}
+
+				promises.push(me.save(null, options));
+				_.each(relationsToFix, function(relation) {
+					relation.includeInJSON = true;
+				});
+
+				if (!options.silent) me.trigger('commit', me, options);
+			}
+
+			return Backbone.$.when.apply(Backbone.$, promises);
+		},
+		
+		// Have we changed since last savepoint? (this includes relations)
+		hasChangedDeepSinceSavepoint: function() {
+			return !_.isEqual(this.toJSON(),this.savepoint);
 		},
 
 		/**
@@ -1771,7 +1825,70 @@
 	});
 	_.extend( Backbone.RelationalModel.prototype, Backbone.Semaphore );
 
+	/**
+	 * Override Backbone.Collection.initialize, so we can track changes.
+	 */
+	var initialize = Backbone.Collection.prototype.__initialize = Backbone.Collection.prototype.initialize;
+	Backbone.Collection.prototype.initialize = function( models, options ) {
+		initialize.apply(this, arguments);
+		this.createSavepoint();
+		this.on('sync', this.createSavepoint, this);
+	};
+	
+	Backbone.Collection.prototype.createSavepoint = function ( ) {
+		this._added = [];
+		this._removed = [];
+		return this;
+		_.each(this.models, function ( model ) {
+			model.createSavepoint();
+		});
+	};
+	
+	Backbone.Collection.prototype.rollback = function( options ) {
+		options = options || {};
+		this.add(this._removed, {silent:true});
+		_.each(this.models, function ( model ) {
+			model.rollback();
+		});
+		this.remove(this._added, {silent:true});
+		this.createSavepoint();
+		if (!options.silent) this.trigger('rollback', this, options);
+		return this;
+	};
+	
+	Backbone.Collection.prototype.hasChangedDeepSinceSavepoint = function() {
+		if (this._removed.length || this._added.length) {
+			return true;
+		}
+		return !!_.find(this.models, function ( model ) {
+			return model.hasChangedDeepSinceSavepoint();
+		});
+	}
+	
+	Backbone.Collection.prototype.commit = function( options ) {
+		var promises = [];
+
+		if (this.hasChangedDeepSinceSavepoint()) {
+			options = options || {};
+
+			_.each(this._removed, function ( model ) {
+				promises.push(model.destroy());
+			});
+			
+			_.each(this.models, function ( model ) {
+				promises.push(model.commit());
+			});
+
+			this.createSavepoint();
+
+			if (!options.silent) this.trigger('commit', this, options);
+		}
+
+		return Backbone.$.when.apply(Backbone.$, promises);
+	}
+	
 	Backbone.Collection.prototype._class = "Backbone.Collection";
+	
 	/**
 	 * Override Backbone.Collection._prepareModel, so objects will be built using the correct type
 	 * if the collection.model has subModels.
@@ -1880,12 +1997,30 @@
 	};
 
 	/**
+	 * Override 'Backbone.Collection.add' 
+	 */
+	var add = Backbone.Collection.prototype.__add = Backbone.Collection.prototype.add;
+	Backbone.Collection.prototype.add = function(models, options) {
+		models = _.isArray( models ) ? models.slice( 0 ) : [ models ];
+		// Short-circuit if this Collection doesn't hold RelationalModels
+		if ( !( this.model.prototype instanceof Backbone.RelationalModel ) ) {
+			return add.apply( this, arguments );
+		}
+		//console.log("Backbone.Collection.prototype.add", this._class, (models[0] || models)._class, options);
+		// TODO, use keys to add missing data based on related model info. xxxSTR
+		var ret = this.set( models, _.defaults( options || {}, {add: true, merge: false, remove: false} ) );
+		this._added = this._added.concat(models);
+		return ret;
+	};
+
+	/**
 	 * Override 'Backbone.Collection.remove' to trigger 'relational:remove'.
 	 */
 	var remove = Backbone.Collection.prototype.__remove = Backbone.Collection.prototype.remove;
 	Backbone.Collection.prototype.remove = function( models, options ) {
 		// Short-circuit if this Collection doesn't hold RelationalModels
 		if ( !( this.model.prototype instanceof Backbone.RelationalModel ) ) {
+			this._removed = this._removed.concat(models);
 			return remove.apply( this, arguments );
 		}
 
@@ -1906,6 +2041,7 @@
 			_.each( toRemove, function( model ) {
 				this.trigger('relational:remove', model, this, options);
 			}, this );
+			this._removed = this._removed.concat(toRemove);
 		}
 		
 		return this;
@@ -1918,11 +2054,12 @@
 	Backbone.Collection.prototype.reset = function( models, options ) {
 		options = _.extend( { merge: true }, options );
 		reset.call( this, models, options );
-
+		this._added=[];
+		this._removed=[];
 		if ( this.model.prototype instanceof Backbone.RelationalModel ) {
 			this.trigger( 'relational:reset', this, options );
 		}
-
+		this.createSavepoint();
 		return this;
 	};
 
